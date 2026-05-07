@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/quota"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -173,6 +174,7 @@ func (e *AIStudioExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth,
 		return resp, err
 	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, wsResp.Status, wsResp.Headers.Clone())
+	quota.RecordResponse(auth, wsResp.Status, wsResp.Headers)
 	if len(wsResp.Body) > 0 {
 		helps.AppendAPIResponseChunk(ctx, e.cfg, wsResp.Body)
 	}
@@ -244,6 +246,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 		metadataLogged := false
 		if firstEvent.Status > 0 {
 			helps.RecordAPIResponseMetadata(ctx, e.cfg, firstEvent.Status, firstEvent.Headers.Clone())
+			quota.RecordResponse(auth, firstEvent.Status, firstEvent.Headers)
 			metadataLogged = true
 		}
 		var body bytes.Buffer
@@ -264,6 +267,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 			}
 			if !metadataLogged && event.Status > 0 {
 				helps.RecordAPIResponseMetadata(ctx, e.cfg, event.Status, event.Headers.Clone())
+				quota.RecordResponse(auth, event.Status, event.Headers)
 				metadataLogged = true
 			}
 			if len(event.Payload) > 0 {
@@ -295,6 +299,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 			case wsrelay.MessageTypeStreamStart:
 				if !metadataLogged && event.Status > 0 {
 					helps.RecordAPIResponseMetadata(ctx, e.cfg, event.Status, event.Headers.Clone())
+					quota.RecordResponse(auth, event.Status, event.Headers)
 					metadataLogged = true
 				}
 			case wsrelay.MessageTypeStreamChunk:
@@ -319,6 +324,7 @@ func (e *AIStudioExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth
 			case wsrelay.MessageTypeHTTPResp:
 				if !metadataLogged && event.Status > 0 {
 					helps.RecordAPIResponseMetadata(ctx, e.cfg, event.Status, event.Headers.Clone())
+					quota.RecordResponse(auth, event.Status, event.Headers)
 					metadataLogged = true
 				}
 				if len(event.Payload) > 0 {
@@ -399,6 +405,7 @@ func (e *AIStudioExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.A
 		return cliproxyexecutor.Response{}, err
 	}
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, resp.Status, resp.Headers.Clone())
+	quota.RecordResponse(auth, resp.Status, resp.Headers)
 	if len(resp.Body) > 0 {
 		helps.AppendAPIResponseChunk(ctx, e.cfg, resp.Body)
 	}
