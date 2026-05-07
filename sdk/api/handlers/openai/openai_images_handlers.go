@@ -145,6 +145,15 @@ func isSupportedImagesModel(model string) bool {
 	if baseModel == defaultImagesToolModel {
 		return true
 	}
+	// Accept the entire gpt-image-* family (gpt-image-1, gpt-image-1.5,
+	// gpt-image-2, gpt-image-2-plus, ...). Aggregator providers like
+	// gptsapi.net expose newer/older variants under different exact names;
+	// pinning to a single id breaks them. We forward the model verbatim
+	// to upstream — if it's truly unsupported, upstream returns the right
+	// error.
+	if strings.HasPrefix(baseModel, "gpt-image-") {
+		return true
+	}
 	return isXAIImagesModel(model) || isOpenAICompatImagesModel(model)
 }
 
