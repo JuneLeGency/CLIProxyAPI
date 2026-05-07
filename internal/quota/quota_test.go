@@ -60,6 +60,63 @@ func TestParseClaude_NoHeaders(t *testing.T) {
 	}
 }
 
+func TestParseClaude_OAuthUnifiedHeaders(t *testing.T) {
+	// Real header shape observed from Anthropic OAuth-beta /v1/messages —
+	// Reset is Unix epoch seconds (integer string), Status is
+	// "allowed" / "warning" / "exceeded".
+	h := http.Header{}
+	h.Set("Anthropic-Ratelimit-Unified-Status", "allowed")
+	h.Set("Anthropic-Ratelimit-Unified-5h-Status", "allowed")
+	h.Set("Anthropic-Ratelimit-Unified-5h-Reset", "1778143200") // 2026-05-08T18:00:00Z
+	h.Set("Anthropic-Ratelimit-Unified-5h-Utilization", "0.42")
+	h.Set("Anthropic-Ratelimit-Unified-7d-Status", "warning")
+	h.Set("Anthropic-Ratelimit-Unified-7d-Reset", "1778565600") // 2026-05-13T13:00:00Z
+	h.Set("Anthropic-Ratelimit-Unified-7d-Utilization", "0.78")
+	h.Set("Anthropic-Ratelimit-Unified-7d_sonnet-Status", "allowed")
+	h.Set("Anthropic-Ratelimit-Unified-7d_sonnet-Reset", "1778565600")
+	h.Set("Anthropic-Ratelimit-Unified-7d_sonnet-Utilization", "0.61")
+
+	got := parseClaude(200, h)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 unified samples, got %d (%+v)", len(got), got)
+	}
+
+	wantBy := map[string]int64{
+		"anthropic_unified_5h":        58, // (1-0.42)*100
+		"anthropic_unified_7d":        22, // (1-0.78)*100
+		"anthropic_unified_7d_sonnet": 39, // (1-0.61)*100
+	}
+	for _, s := range got {
+		want, ok := wantBy[s.Scheme]
+		if !ok {
+			t.Errorf("unexpected scheme %q", s.Scheme)
+			continue
+		}
+		if s.Remaining != want || s.Limit != 100 || s.Unit != "percent" {
+			t.Errorf("%s: got remaining=%d limit=%d unit=%q, want remaining=%d limit=100 unit=%q",
+				s.Scheme, s.Remaining, s.Limit, s.Unit, want, "percent")
+		}
+		if s.ResetsAt.IsZero() {
+			t.Errorf("%s: reset should parse", s.Scheme)
+		}
+	}
+}
+
+func TestParseClaude_OAuthExceededForcesZero(t *testing.T) {
+	// "exceeded" status with no utilization should still force remaining=0.
+	h := http.Header{}
+	h.Set("Anthropic-Ratelimit-Unified-5h-Status", "exceeded")
+	h.Set("Anthropic-Ratelimit-Unified-5h-Reset", "1778143200")
+
+	got := parseClaude(429, h)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 sample, got %d", len(got))
+	}
+	if got[0].Remaining != 0 {
+		t.Errorf("exceeded status should force remaining=0, got %d", got[0].Remaining)
+	}
+}
+
 func TestParseOpenAI_StandardHeaders(t *testing.T) {
 	h := http.Header{}
 	h.Set("x-ratelimit-limit-requests", "60")

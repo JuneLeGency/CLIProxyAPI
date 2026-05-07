@@ -1,6 +1,7 @@
 package quota
 
 import (
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -8,28 +9,37 @@ import (
 )
 
 // parseClaude extracts samples from Anthropic Messages API rate-limit headers.
-// Anthropic emits triples per scheme on every successful response:
 //
-//	anthropic-ratelimit-requests-{limit,remaining,reset}
-//	anthropic-ratelimit-tokens-{limit,remaining,reset}
-//	anthropic-ratelimit-input-tokens-{limit,remaining,reset}
-//	anthropic-ratelimit-output-tokens-{limit,remaining,reset}
+// Two header families are produced by different Anthropic endpoints:
 //
-// Reset values are RFC3339 timestamps. We additionally surface
-// `anthropic-ratelimit-priority-tier` and the OAuth 5h rolling-window message
-// counter when present.
+//  1. API-key path (documented at platform.claude.com):
+//     anthropic-ratelimit-{requests,tokens,input-tokens,output-tokens}-{limit,remaining,reset}
+//
+//  2. OAuth-beta path (Pro / Team subscriptions, undocumented but emitted on
+//     every successful claude.ai-style /v1/messages call):
+//     Anthropic-Ratelimit-Unified-{5h,7d,7d_sonnet}-{Status,Reset,Utilization}
+//
+// We parse both — most successful OAuth requests will yield only the
+// "unified" family, while API-key requests yield only the legacy family.
+// Mixed responses just produce more samples.
+//
+// Utilization is 0.0–1.0. We translate it into Limit=100 / Remaining=
+// floor((1-util)*100) so callers get a percent-based view (the absolute
+// token / message numbers are not exposed by Anthropic on the OAuth path).
 func parseClaude(_ int, h http.Header) []Sample {
 	if h == nil {
 		return nil
 	}
-	schemes := []struct{ key, scheme, unit string }{
+	out := make([]Sample, 0, 6)
+
+	// (1) API-key family
+	apiKeyFamily := []struct{ key, scheme, unit string }{
 		{"anthropic-ratelimit-requests", "anthropic_requests", "requests"},
 		{"anthropic-ratelimit-tokens", "anthropic_tokens", "tokens"},
 		{"anthropic-ratelimit-input-tokens", "anthropic_input_tokens", "tokens"},
 		{"anthropic-ratelimit-output-tokens", "anthropic_output_tokens", "tokens"},
 	}
-	out := make([]Sample, 0, len(schemes))
-	for _, s := range schemes {
+	for _, s := range apiKeyFamily {
 		limit, lOK := readInt(h, s.key+"-limit")
 		remaining, rOK := readInt(h, s.key+"-remaining")
 		if !lOK && !rOK {
@@ -44,6 +54,44 @@ func parseClaude(_ int, h http.Header) []Sample {
 			Source:    SourceHeader,
 		})
 	}
+
+	// (2) OAuth-beta unified family — windows: 5h (rolling), 7d (rolling),
+	// 7d_sonnet (per-model 7d rolling for Sonnet).
+	for _, window := range []string{"5h", "7d", "7d_sonnet"} {
+		prefix := "Anthropic-Ratelimit-Unified-" + window
+		util := strings.TrimSpace(h.Get(prefix + "-Utilization"))
+		reset := h.Get(prefix + "-Reset")
+		status := h.Get(prefix + "-Status")
+		if util == "" && reset == "" && status == "" {
+			continue
+		}
+		remaining := int64(0)
+		limit := int64(100)
+		if util != "" {
+			if u, err := strconv.ParseFloat(util, 64); err == nil {
+				if u < 0 {
+					u = 0
+				}
+				if u > 1 {
+					u = 1
+				}
+				remaining = int64(math.Round((1 - u) * 100))
+			}
+		}
+		// If status reports exceeded but utilization wasn't sent, force 0.
+		if strings.EqualFold(strings.TrimSpace(status), "exceeded") {
+			remaining = 0
+		}
+		out = append(out, Sample{
+			Scheme:    "anthropic_unified_" + window,
+			Limit:     limit,
+			Remaining: remaining,
+			Unit:      "percent",
+			ResetsAt:  readTime(h, prefix+"-Reset"),
+			Source:    SourceHeader,
+		})
+	}
+
 	return out
 }
 
@@ -125,7 +173,9 @@ func readInt(h http.Header, key string) (int64, bool) {
 	return n, true
 }
 
-// readTime parses an RFC3339 timestamp. Returns zero time if missing/invalid.
+// readTime parses a timestamp from a header. Accepts RFC3339, integer Unix
+// seconds (Anthropic's OAuth-beta unified family uses this), or floating
+// Unix seconds. Returns zero time when missing or unparseable.
 func readTime(h http.Header, key string) time.Time {
 	v := strings.TrimSpace(h.Get(key))
 	if v == "" {
@@ -136,6 +186,16 @@ func readTime(h http.Header, key string) time.Time {
 	}
 	if t, err := time.Parse(time.RFC3339Nano, v); err == nil {
 		return t.UTC()
+	}
+	if secs, err := strconv.ParseInt(v, 10, 64); err == nil {
+		// Anthropic OAuth uses Unix seconds. Heuristic: a value that
+		// looks like a Unix epoch (>= 2001-01-01) is treated as such.
+		if secs > 1_000_000_000 {
+			return time.Unix(secs, 0).UTC()
+		}
+	}
+	if f, err := strconv.ParseFloat(v, 64); err == nil && f > 1_000_000_000 {
+		return time.Unix(int64(f), 0).UTC()
 	}
 	return time.Time{}
 }

@@ -18,8 +18,6 @@ func RecordResponse(auth *cliproxyauth.Auth, status int, headers http.Header) {
 	}
 	samples := parseFor(auth.Provider, status, headers)
 	if samples == nil {
-		// Unknown provider — leave any existing snapshot alone rather than
-		// clearing it. Successful Gemini calls go through this path.
 		return
 	}
 	Default.Put(auth.ID, samples)
