@@ -66,9 +66,37 @@ func (h *Handler) ProbeQuota(ctx context.Context, auth *coreauth.Auth) probeResu
 	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 
+	// Disabled accounts are skipped by the auto-refresh loop, so their OAuth
+	// access_tokens go stale after their TTL (typically 1h). Without an
+	// explicit pre-refresh here, every probe against a long-disabled account
+	// would just bounce with 401 and the operator would learn nothing about
+	// the underlying credential's actual quota state. Force a refresh first
+	// — if the refresh_token itself is also dead, the error surfaces cleanly
+	// in `error` instead of hiding inside a generic 401.
+	if errRefresh := h.authManager.ForceRefreshAuth(probeCtx, auth.ID); errRefresh != nil {
+		// Non-fatal: some auths have no refresh_token (api-key entries,
+		// for example), and their executor's Refresh is a no-op that
+		// returns nil. The error path covers actually-dead refresh tokens
+		// — proceed to the probe anyway so we still get a status_code +
+		// body_snippet to show why the credential is no longer usable.
+		res.Error = fmt.Sprintf("pre-probe token refresh failed: %v", errRefresh)
+	}
+	// Re-read auth so the post-refresh access_token (written back to
+	// Metadata by ForceRefreshAuth -> Update) is visible to the token
+	// resolver below.
+	if refreshed, ok := h.authManager.GetByID(auth.ID); ok && refreshed != nil {
+		auth = refreshed
+	}
+
 	token, errToken := h.resolveTokenForAuth(probeCtx, auth)
 	if errToken != nil {
-		res.Error = fmt.Sprintf("token refresh failed: %v", errToken)
+		// Keep any pre-existing refresh-failure context — the resolver
+		// error is usually a downstream symptom of the same problem.
+		if res.Error != "" {
+			res.Error += "; " + fmt.Sprintf("token resolve: %v", errToken)
+		} else {
+			res.Error = fmt.Sprintf("token refresh failed: %v", errToken)
+		}
 		res.DurationMS = time.Since(start).Milliseconds()
 		return res
 	}

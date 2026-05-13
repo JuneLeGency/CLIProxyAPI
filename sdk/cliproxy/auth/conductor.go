@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -4031,6 +4032,59 @@ func (m *Manager) markRefreshPending(id string, now time.Time) bool {
 
 	m.queueRefreshReschedule(id)
 	return true
+}
+
+// ForceRefreshAuth runs the provider executor's Refresh path for one auth
+// immediately, bypassing the auto-refresh scheduler and the disabled filter.
+//
+// The auto-refresh loop intentionally skips disabled accounts (we don't want
+// to keep paying for OAuth round-trips on credentials the operator told us
+// to ignore), but that means a disabled OAuth account's access token will
+// eventually expire and any subsequent manual probe will fail with 401.
+// Management endpoints that want fresh-token behaviour for disabled accounts
+// can call this method before sending the probe.
+//
+// Errors from the executor's Refresh are returned verbatim so callers can
+// surface "credential is actually dead, not just dormant" to operators
+// instead of just "401". On success the new token is persisted via Update.
+func (m *Manager) ForceRefreshAuth(ctx context.Context, id string) error {
+	if id == "" {
+		return fmt.Errorf("auth id required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	m.mu.RLock()
+	auth := m.auths[id]
+	var exec ProviderExecutor
+	var cloned *Auth
+	if auth != nil {
+		exec = m.executors[auth.Provider]
+		cloned = auth.Clone()
+	}
+	m.mu.RUnlock()
+	if auth == nil {
+		return fmt.Errorf("auth %q not found", id)
+	}
+	if exec == nil {
+		return fmt.Errorf("no executor registered for provider %q", auth.Provider)
+	}
+	updated, err := exec.Refresh(ctx, cloned)
+	if err != nil {
+		return err
+	}
+	if updated == nil {
+		updated = cloned
+	}
+	if updated.Runtime == nil {
+		updated.Runtime = auth.Runtime
+	}
+	now := time.Now()
+	updated.LastRefreshedAt = now
+	updated.UpdatedAt = now
+	updated.LastError = nil
+	_, errUpdate := m.Update(ctx, updated)
+	return errUpdate
 }
 
 func (m *Manager) refreshAuth(ctx context.Context, id string) {
