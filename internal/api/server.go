@@ -590,6 +590,8 @@ func (s *Server) registerManagementRoutes() {
 
 		mgmt.GET("/quotas", s.mgmt.GetQuotas)
 		mgmt.GET("/quotas/:id", s.mgmt.GetAccountQuotas)
+		mgmt.POST("/quotas/refresh-all", s.mgmt.RefreshQuotas)
+		mgmt.POST("/quotas/:id/refresh", s.mgmt.RefreshAccountQuota)
 
 		mgmt.GET("/quota-exceeded/switch-project", s.mgmt.GetSwitchProject)
 		mgmt.PUT("/quota-exceeded/switch-project", s.mgmt.PutSwitchProject)
