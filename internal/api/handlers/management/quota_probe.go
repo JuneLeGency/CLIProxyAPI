@@ -21,16 +21,16 @@ const probeTimeout = 20 * time.Second
 // returned by ProbeQuota and serialised by the refresh handlers so the
 // frontend can show per-account success/error states.
 type probeResult struct {
-	AuthID       string `json:"auth_id"`
-	StatusCode   int    `json:"status_code,omitempty"`
-	HeaderHit    bool   `json:"header_hit"`
-	Error        string `json:"error,omitempty"`
-	Skipped      bool   `json:"skipped,omitempty"`
-	SkipReason   string `json:"skip_reason,omitempty"`
-	BodySnippet  string `json:"body_snippet,omitempty"`
-	DurationMS   int64  `json:"duration_ms"`
-	ProbedAt     time.Time
-	ProbedAtUnix int64 `json:"probed_at_unix"`
+	AuthID       string    `json:"auth_id"`
+	StatusCode   int       `json:"status_code,omitempty"`
+	HeaderHit    bool      `json:"header_hit"`
+	Error        string    `json:"error,omitempty"`
+	Skipped      bool      `json:"skipped,omitempty"`
+	SkipReason   string    `json:"skip_reason,omitempty"`
+	BodySnippet  string    `json:"body_snippet,omitempty"`
+	DurationMS   int64     `json:"duration_ms"`
+	ProbedAt     time.Time `json:"-"`
+	ProbedAtUnix int64     `json:"probed_at_unix"`
 }
 
 // probeBuilder constructs the (URL, method, headers, body) tuple for a
