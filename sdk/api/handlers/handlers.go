@@ -718,6 +718,22 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 		if upstreamHeaders == nil {
 			upstreamHeaders = make(http.Header)
 		}
+	} else {
+		// Tinker fork: always surface the X-Cliproxy-* TTFT breakdown headers
+		// even when generic passthrough is disabled — they are required by
+		// the Tinker agent's `usage.timing` waterfall and contain no upstream
+		// secrets. See services/llm-gw/upstream/internal/runtime/executor/
+		// claude_executor.go for where these headers are stamped.
+		if streamResult.Headers != nil {
+			for _, key := range []string{"X-Cliproxy-Setup-Ms", "X-Cliproxy-Upstream-Wait-Ms"} {
+				if v := streamResult.Headers.Get(key); v != "" {
+					if upstreamHeaders == nil {
+						upstreamHeaders = make(http.Header)
+					}
+					upstreamHeaders.Set(key, v)
+				}
+			}
+		}
 	}
 	chunks := streamResult.Chunks
 	dataChan := make(chan []byte)

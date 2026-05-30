@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1482,6 +1483,100 @@ func TestClaudeExecutor_ExecuteStream_SetsIdentityAcceptEncoding(t *testing.T) {
 	}
 	if gotAccept != "text/event-stream" {
 		t.Errorf("Accept = %q, want %q", gotAccept, "text/event-stream")
+	}
+}
+
+// TestClaudeExecutor_ExecuteStream_StampsTinkerTTFTHeaders verifies that the
+// Tinker fork instrumentation surfaces TTFT breakdown headers on the streaming
+// response (X-Cliproxy-Setup-Ms / X-Cliproxy-Upstream-Wait-Ms), so the
+// downstream Tinker agent can split its `upstream_connect` phase into cliproxy
+// request-assembly time vs Anthropic-side first-byte wait.
+func TestClaudeExecutor_ExecuteStream_StampsTinkerTTFTHeaders(t *testing.T) {
+	// Simulate an upstream that takes a measurable amount of time so the
+	// Upstream-Wait header has a non-zero value the agent can act on.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(20 * time.Millisecond)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"message_stop\"}\n\n"))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected chunk error: %v", chunk.Err)
+		}
+	}
+
+	setupHdr := result.Headers.Get("X-Cliproxy-Setup-Ms")
+	waitHdr := result.Headers.Get("X-Cliproxy-Upstream-Wait-Ms")
+	if setupHdr == "" {
+		t.Fatalf("X-Cliproxy-Setup-Ms not set; got headers: %#v", result.Headers)
+	}
+	if waitHdr == "" {
+		t.Fatalf("X-Cliproxy-Upstream-Wait-Ms not set; got headers: %#v", result.Headers)
+	}
+	setupMs, errSetup := strconv.Atoi(setupHdr)
+	if errSetup != nil {
+		t.Fatalf("X-Cliproxy-Setup-Ms not numeric: %q (%v)", setupHdr, errSetup)
+	}
+	waitMs, errWait := strconv.Atoi(waitHdr)
+	if errWait != nil {
+		t.Fatalf("X-Cliproxy-Upstream-Wait-Ms not numeric: %q (%v)", waitHdr, errWait)
+	}
+	if setupMs < 0 {
+		t.Errorf("setup_ms = %d, want non-negative", setupMs)
+	}
+	// Server slept 20ms; allow some slack for CI scheduler noise.
+	if waitMs < 10 {
+		t.Errorf("upstream_wait_ms = %d, want >= 10 (server slept 20ms)", waitMs)
+	}
+}
+
+// TestClaudeExecutor_Execute_StampsTinkerTTFTHeaders mirrors the streaming
+// header test for the non-stream path so both code paths stay in sync.
+func TestClaudeExecutor_Execute_StampsTinkerTTFTHeaders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(20 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-3-5-sonnet-20241022","role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	executor := NewClaudeExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"api_key":  "key-123",
+		"base_url": server.URL,
+	}}
+	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "claude-3-5-sonnet-20241022",
+		Payload: []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if resp.Headers.Get("X-Cliproxy-Setup-Ms") == "" {
+		t.Fatalf("X-Cliproxy-Setup-Ms not set on non-stream response; got headers: %#v", resp.Headers)
+	}
+	if resp.Headers.Get("X-Cliproxy-Upstream-Wait-Ms") == "" {
+		t.Fatalf("X-Cliproxy-Upstream-Wait-Ms not set on non-stream response; got headers: %#v", resp.Headers)
 	}
 }
 

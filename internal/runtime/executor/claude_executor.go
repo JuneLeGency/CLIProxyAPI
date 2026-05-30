@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -129,6 +130,9 @@ func (e *ClaudeExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Aut
 }
 
 func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	// Tinker-fork TTFT instrumentation; see ExecuteStream for rationale.
+	// Headers are propagated via resp.Headers when non-stream mode is used.
+	tCpEntry := time.Now()
 	if opts.Alt == "responses/compact" {
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
@@ -227,11 +231,15 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	})
 
 	httpClient := helps.NewUtlsHTTPClient(e.cfg, auth, 0)
+	tCpSend := time.Now()
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
+	tCpFirstByte := time.Now()
+	httpResp.Header.Set("X-Cliproxy-Setup-Ms", strconv.FormatInt(tCpSend.Sub(tCpEntry).Milliseconds(), 10))
+	httpResp.Header.Set("X-Cliproxy-Upstream-Wait-Ms", strconv.FormatInt(tCpFirstByte.Sub(tCpSend).Milliseconds(), 10))
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	quota.RecordResponse(auth, httpResp.StatusCode, httpResp.Header)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
@@ -310,6 +318,14 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 }
 
 func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	// Tinker-fork TTFT instrumentation. Two timestamps cover the cliproxy-side
+	// portion of agent-side `upstream_connect`: how much time we spent on
+	// request assembly (translator + cloaking + signing) and how long the
+	// outbound HTTP Do call took (TCP+TLS+Anthropic queue admission+first byte).
+	// Surfaced via X-Cliproxy-Setup-Ms / X-Cliproxy-Upstream-Wait-Ms on the
+	// streaming response headers; agent (`services/agent/src/agent/agent.py:
+	// _log_response_latency`) reads them and merges into `usage.timing`.
+	tCpEntry := time.Now()
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
@@ -402,11 +418,20 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	})
 
 	httpClient := helps.NewUtlsHTTPClient(e.cfg, auth, 0)
+	tCpSend := time.Now()
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
+	tCpFirstByte := time.Now()
+	// Tinker-fork: stamp TTFT breakdown headers BEFORE returning the stream.
+	// Setup = request assembly cost; Upstream-Wait = HTTP Do duration (≈
+	// network + TLS + Anthropic queue + first response byte). The remainder
+	// the agent observes between iter_start and first SSE chunk is then
+	// just (agent→cliproxy network) + (cliproxy forward overhead).
+	httpResp.Header.Set("X-Cliproxy-Setup-Ms", strconv.FormatInt(tCpSend.Sub(tCpEntry).Milliseconds(), 10))
+	httpResp.Header.Set("X-Cliproxy-Upstream-Wait-Ms", strconv.FormatInt(tCpFirstByte.Sub(tCpSend).Milliseconds(), 10))
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	quota.RecordResponse(auth, httpResp.StatusCode, httpResp.Header)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
