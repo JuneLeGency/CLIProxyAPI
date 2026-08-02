@@ -122,21 +122,49 @@ func (h *Handler) ProbeQuota(ctx context.Context, auth *coreauth.Auth) probeResu
 	defer func() { _ = resp.Body.Close() }()
 
 	res.StatusCode = resp.StatusCode
-	// Record headers even on non-2xx — 429 specifically carries the most
-	// useful Retry-After / remaining=0 signal. RecordResponse no-ops if the
-	// parser yields zero samples, so untranslatable responses don't clobber.
 	before, _ := quota.Default.Get(auth.ID)
-	quota.RecordResponse(auth, resp.StatusCode, resp.Header)
-	after, _ := quota.Default.Get(auth.ID)
-	res.HeaderHit = !after.ObservedAt.Equal(before.ObservedAt)
+	// Codex subscription quotas are returned as JSON by /wham/usage rather
+	// than in x-ratelimit headers. Buffer this small response once so it can
+	// feed both the quota store and the diagnostic error snippet below.
+	var responseBody []byte
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		responseBody, _ = io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			if samples, errUsage := quota.ParseCodexUsage(responseBody); errUsage == nil {
+				quota.Default.Put(auth.ID, samples)
+			} else {
+				res.Error = errUsage.Error()
+			}
+		}
+	}
+	// Record headers even on non-2xx — 429 specifically carries the most
+	// useful Retry-After / remaining=0 signal.
+	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		// The body parser above already populated the store. Running the
+		// generic OpenAI header parser here would see no x-ratelimit headers
+		// and clear the freshly recorded subscription windows.
+		after, ok := quota.Default.Get(auth.ID)
+		res.HeaderHit = ok && !after.ObservedAt.Equal(before.ObservedAt)
+	} else {
+		quota.RecordResponse(auth, resp.StatusCode, resp.Header)
+		after, _ := quota.Default.Get(auth.ID)
+		res.HeaderHit = !after.ObservedAt.Equal(before.ObservedAt)
+	}
 
 	// Capture a tiny body snippet on errors so the frontend can show why
 	// the probe came back 4xx/5xx (e.g. "invalid_api_key"). 256 bytes is
 	// enough for any structured provider error.
 	if resp.StatusCode >= 400 {
-		buf := &bytes.Buffer{}
-		_, _ = io.CopyN(buf, resp.Body, 256)
-		res.BodySnippet = strings.TrimSpace(buf.String())
+		if len(responseBody) > 0 {
+			if len(responseBody) > 256 {
+				responseBody = responseBody[:256]
+			}
+			res.BodySnippet = strings.TrimSpace(string(responseBody))
+		} else {
+			buf := &bytes.Buffer{}
+			_, _ = io.CopyN(buf, resp.Body, 256)
+			res.BodySnippet = strings.TrimSpace(buf.String())
+		}
 	}
 
 	res.DurationMS = time.Since(start).Milliseconds()
@@ -151,7 +179,9 @@ func selectProbeBuilder(auth *coreauth.Auth) (probeBuilder, string) {
 	switch provider {
 	case "claude", "anthropic":
 		return buildClaudeProbe, provider
-	case "codex", "openai":
+	case "codex":
+		return buildCodexUsageProbe, provider
+	case "openai":
 		return buildOpenAIProbe, provider
 	case "openai-compat", "kimi", "iflow", "qwen":
 		// Same wire format as OpenAI — base_url usually lives in attributes.
@@ -163,6 +193,25 @@ func selectProbeBuilder(auth *coreauth.Auth) (probeBuilder, string) {
 	// explicitly opted in to this fallback so unrecognised providers still
 	// get a chance to surface fresh quota data.
 	return buildOpenAICompatProbe, provider
+}
+
+// buildCodexUsageProbe reads the same lightweight subscription-usage endpoint
+// used by Codex CLI. It consumes no model tokens and exposes rolling 5h/7d
+// windows (or the plan-specific windows returned for this account).
+func buildCodexUsageProbe(auth *coreauth.Auth, token string) (*http.Request, error) {
+	req, err := http.NewRequest(http.MethodGet, "https://chatgpt.com/backend-api/wham/usage", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("User-Agent", "codex_cli_rs/0.146.0")
+	if auth.Metadata != nil {
+		if accountID, ok := auth.Metadata["account_id"].(string); ok && strings.TrimSpace(accountID) != "" {
+			req.Header.Set("ChatGPT-Account-ID", strings.TrimSpace(accountID))
+		}
+	}
+	return req, nil
 }
 
 // buildClaudeProbe sends the minimal Anthropic Messages probe that returns
@@ -202,11 +251,6 @@ func buildClaudeProbe(auth *coreauth.Auth, token string) (*http.Request, error) 
 }
 
 // buildOpenAIProbe targets the canonical OpenAI Chat Completions endpoint.
-// Codex (ChatGPT-backend) auths are NOT routed here — they have a custom
-// endpoint that needs ChatGPT-specific cookies which probeBuilder can't fake;
-// for now we share the OpenAI template and accept that codex-oauth auths
-// may probe-fail with 401, which still surfaces the right "credential dead"
-// signal.
 func buildOpenAIProbe(auth *coreauth.Auth, token string) (*http.Request, error) {
 	baseURL := "https://api.openai.com"
 	if auth.Attributes != nil {

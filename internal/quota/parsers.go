@@ -1,12 +1,77 @@
 package quota
 
 import (
+	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// ParseCodexUsage extracts ChatGPT/Codex subscription windows returned by
+// GET /backend-api/wham/usage. Unlike API-key rate limits, Codex OAuth quota
+// is reported in the response body as a used percentage for rolling windows.
+func ParseCodexUsage(body []byte) ([]Sample, error) {
+	type window struct {
+		UsedPercent        float64 `json:"used_percent"`
+		WindowMinutes      int64   `json:"window_minutes"`
+		LimitWindowSeconds int64   `json:"limit_window_seconds"`
+		ResetsAt           int64   `json:"resets_at"`
+		ResetAt            int64   `json:"reset_at"`
+	}
+	type rateLimit struct {
+		Primary   *window `json:"primary_window"`
+		Secondary *window `json:"secondary_window"`
+	}
+	var payload struct {
+		RateLimit *rateLimit `json:"rate_limit"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("decode codex usage: %w", err)
+	}
+	if payload.RateLimit == nil {
+		return nil, fmt.Errorf("codex usage response has no rate_limit")
+	}
+	out := make([]Sample, 0, 2)
+	appendWindow := func(position string, w *window) {
+		if w == nil {
+			return
+		}
+		minutes := w.WindowMinutes
+		if minutes <= 0 && w.LimitWindowSeconds > 0 {
+			minutes = w.LimitWindowSeconds / 60
+		}
+		if minutes <= 0 {
+			return
+		}
+		used := math.Max(0, math.Min(100, w.UsedPercent))
+		remaining := int64(math.Round(100 - used))
+		scheme := fmt.Sprintf("codex_%s_%dm", position, minutes)
+		switch minutes {
+		case 300:
+			scheme = "codex_5h"
+		case 10080:
+			scheme = "codex_7d"
+		}
+		var reset time.Time
+		resetAt := w.ResetsAt
+		if resetAt <= 0 {
+			resetAt = w.ResetAt
+		}
+		if resetAt > 0 {
+			reset = time.Unix(resetAt, 0).UTC()
+		}
+		out = append(out, Sample{Scheme: scheme, Limit: 100, Remaining: remaining, Unit: "percent", ResetsAt: reset, Source: SourceHeader})
+	}
+	appendWindow("primary", payload.RateLimit.Primary)
+	appendWindow("secondary", payload.RateLimit.Secondary)
+	if len(out) == 0 {
+		return nil, fmt.Errorf("codex usage response has no quota windows")
+	}
+	return out, nil
+}
 
 // parseClaude extracts samples from Anthropic Messages API rate-limit headers.
 //

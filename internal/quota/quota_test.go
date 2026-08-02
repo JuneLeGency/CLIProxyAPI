@@ -8,6 +8,34 @@ import (
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
+func TestParseCodexUsage_Windows(t *testing.T) {
+	body := []byte(`{"rate_limit":{"primary_window":{"used_percent":42.4,"limit_window_seconds":18000,"reset_at":1778143200},"secondary_window":{"used_percent":78,"limit_window_seconds":604800,"reset_at":1778565600}}}`)
+	got, err := ParseCodexUsage(body)
+	if err != nil {
+		t.Fatalf("ParseCodexUsage: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 samples, got %d", len(got))
+	}
+	if got[0].Scheme != "codex_5h" || got[0].Remaining != 58 || got[0].Unit != "percent" {
+		t.Errorf("primary: %+v", got[0])
+	}
+	if got[1].Scheme != "codex_7d" || got[1].Remaining != 22 {
+		t.Errorf("secondary: %+v", got[1])
+	}
+}
+
+func TestParseCodexUsage_PlanSpecificSingleWindow(t *testing.T) {
+	body := []byte(`{"rate_limit":{"primary_window":{"used_percent":3,"window_minutes":10080,"resets_at":1786207307},"secondary_window":null}}`)
+	got, err := ParseCodexUsage(body)
+	if err != nil {
+		t.Fatalf("ParseCodexUsage: %v", err)
+	}
+	if len(got) != 1 || got[0].Scheme != "codex_7d" || got[0].Remaining != 97 {
+		t.Fatalf("unexpected samples: %+v", got)
+	}
+}
+
 func TestParseClaude_AnthropicHeaders(t *testing.T) {
 	h := http.Header{}
 	h.Set("anthropic-ratelimit-requests-limit", "1000")
