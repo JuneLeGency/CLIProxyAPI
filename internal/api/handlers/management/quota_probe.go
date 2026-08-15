@@ -88,7 +88,7 @@ func (h *Handler) ProbeQuota(ctx context.Context, auth *coreauth.Auth) probeResu
 		auth = refreshed
 	}
 
-	token, errToken := h.resolveTokenForAuth(probeCtx, auth)
+	token, errToken := h.resolveTokenForAuth(probeCtx, auth, "")
 	if errToken != nil {
 		// Keep any pre-existing refresh-failure context — the resolver
 		// error is usually a downstream symptom of the same problem.
@@ -111,7 +111,7 @@ func (h *Handler) ProbeQuota(ctx context.Context, auth *coreauth.Auth) probeResu
 
 	client := &http.Client{
 		Timeout:   probeTimeout,
-		Transport: h.apiCallTransport(auth),
+		Transport: h.apiCallTransport(auth, ""),
 	}
 	resp, errDo := client.Do(req)
 	if errDo != nil {
