@@ -81,10 +81,10 @@ func legacyAntigravityFunctionCallPartLocation(payload []byte, callID string) (c
 		if !parts.IsArray() {
 			continue
 		}
-		for pi, part := range parts.Array() {
+		for partIndex, part := range parts.Array() {
 			fc := part.Get("functionCall")
 			if fc.Exists() && strings.TrimSpace(fc.Get("id").String()) == callID {
-				return ci, pi, true
+				return ci, partIndex, true
 			}
 		}
 	}
@@ -109,24 +109,24 @@ func legacyAntigravityFunctionCallPartLocationForReplayWithSchemas(payload []byt
 		if candidateID == "" {
 			continue
 		}
-		ci, pi, found := legacyAntigravityFunctionCallPartLocation(payload, candidateID)
+		ci, partIndex, found := legacyAntigravityFunctionCallPartLocation(payload, candidateID)
 		if !found {
 			continue
 		}
 		if legacyAntigravityReplayItemContextMatches(payload, itemResult, ci) {
-			fc := gjson.GetBytes(payload, fmt.Sprintf("request.contents.%d.parts.%d.functionCall", ci, pi))
+			fc := gjson.GetBytes(payload, fmt.Sprintf("request.contents.%d.parts.%d.functionCall", ci, partIndex))
 			if antigravityFunctionCallMatchesReplayItem(fc, itemResult, toolSchemas) {
-				return ci, pi, true
+				return ci, partIndex, true
 			}
 			log.Debugf("antigravity replay: located call %q at contents[%d].parts[%d] but name/args did not match ledger item (opaque_id=%t)",
-				name, ci, pi, util.IsGeminiClaudeToolUseID(candidateID))
+				name, ci, partIndex, util.IsGeminiClaudeToolUseID(candidateID))
 			return -1, -1, false
 		}
 		// The candidate ID matched exactly, so callID+name+args are already proven
 		// identical. Only the surrounding context drifted, which invalidates the
 		// cached signature but not the tool identity.
 		log.Debugf("antigravity replay: exact tool ID match for %q at contents[%d].parts[%d] rejected by context hash (opaque_id=%t)",
-			name, ci, pi, util.IsGeminiClaudeToolUseID(candidateID))
+			name, ci, partIndex, util.IsGeminiClaudeToolUseID(candidateID))
 		return -1, -1, false
 	}
 	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
@@ -141,13 +141,13 @@ func legacyAntigravityFunctionCallPartLocationForReplayWithSchemas(payload []byt
 		}
 		wantedOccurrence := int(targetOccurrence.Int())
 		occurrence := 0
-		for pi, part := range contentArr[cachedCI].Get("parts").Array() {
+		for partIndex, part := range contentArr[cachedCI].Get("parts").Array() {
 			fc := part.Get("functionCall")
 			if !fc.Exists() || (util.IsGeminiClaudeToolUseID(fc.Get("id").String()) && fc.Get("id").String() != util.GeminiClaudeToolUseID(callID, name, args.Raw)) || !antigravityFunctionCallMatchesReplayItem(fc, itemResult, toolSchemas) {
 				continue
 			}
 			if occurrence == wantedOccurrence {
-				return cachedCI, pi, true
+				return cachedCI, partIndex, true
 			}
 			occurrence++
 		}
@@ -159,13 +159,13 @@ func legacyAntigravityFunctionCallPartLocationForReplayWithSchemas(payload []byt
 		if !legacyAntigravityReplayItemContextMatches(payload, itemResult, ci) {
 			continue
 		}
-		for pi, part := range content.Get("parts").Array() {
+		for partIndex, part := range content.Get("parts").Array() {
 			fc := part.Get("functionCall")
 			if !fc.Exists() || (util.IsGeminiClaudeToolUseID(fc.Get("id").String()) && fc.Get("id").String() != util.GeminiClaudeToolUseID(callID, name, args.Raw)) {
 				continue
 			}
 			if antigravityFunctionCallMatchesReplayItem(fc, itemResult, toolSchemas) {
-				matches = append(matches, [2]int{ci, pi})
+				matches = append(matches, [2]int{ci, partIndex})
 			}
 		}
 	}
@@ -186,15 +186,15 @@ func legacyAntigravityFunctionCallProvenanceLocation(payload []byte, itemResult 
 	if stableID == "" || stableID == callID {
 		return -1, -1, false
 	}
-	ci, pi, found := legacyAntigravityFunctionCallPartLocation(payload, stableID)
+	ci, partIndex, found := legacyAntigravityFunctionCallPartLocation(payload, stableID)
 	if !found {
 		return -1, -1, false
 	}
-	fc := gjson.GetBytes(payload, fmt.Sprintf("request.contents.%d.parts.%d.functionCall", ci, pi))
+	fc := gjson.GetBytes(payload, fmt.Sprintf("request.contents.%d.parts.%d.functionCall", ci, partIndex))
 	if !antigravityFunctionCallMatchesReplayItem(fc, itemResult, toolSchemas) {
 		return -1, -1, false
 	}
-	return ci, pi, true
+	return ci, partIndex, true
 }
 
 func legacyAntigravityRequestHasThoughtSignatureAt(payload []byte, itemResult gjson.Result) bool {
@@ -232,29 +232,29 @@ func legacyAntigravityThoughtSignatureReplayPartPath(payload []byte, itemResult 
 		if targetOccurrence := itemResult.Get("targetOccurrence"); targetOccurrence.Exists() {
 			wanted := int(targetOccurrence.Int())
 			occurrence := 0
-			for pi, part := range partArr {
+			for partIndex, part := range partArr {
 				kind, fingerprint := antigravityReplayPartFingerprint(part)
 				if fingerprint != targetHash || (targetKind != "" && kind != targetKind) {
 					continue
 				}
 				if occurrence == wanted {
-					return fmt.Sprintf("request.contents.%d.parts.%d", ci, pi), true
+					return fmt.Sprintf("request.contents.%d.parts.%d", ci, partIndex), true
 				}
 				occurrence++
 			}
 			return "", false
 		}
-		pi := int(itemResult.Get("partIndex").Int())
-		if pi >= 0 && pi < len(partArr) {
-			kind, fingerprint := antigravityReplayPartFingerprint(partArr[pi])
+		partIndex := int(itemResult.Get("partIndex").Int())
+		if partIndex >= 0 && partIndex < len(partArr) {
+			kind, fingerprint := antigravityReplayPartFingerprint(partArr[partIndex])
 			if fingerprint == targetHash && (targetKind == "" || kind == targetKind) {
-				return fmt.Sprintf("request.contents.%d.parts.%d", ci, pi), true
+				return fmt.Sprintf("request.contents.%d.parts.%d", ci, partIndex), true
 			}
 		}
-		for pi, part := range partArr {
+		for partIndex, part := range partArr {
 			kind, fingerprint := antigravityReplayPartFingerprint(part)
 			if fingerprint == targetHash && (targetKind == "" || kind == targetKind) {
-				return fmt.Sprintf("request.contents.%d.parts.%d", ci, pi), true
+				return fmt.Sprintf("request.contents.%d.parts.%d", ci, partIndex), true
 			}
 		}
 		return "", false
@@ -265,10 +265,10 @@ func legacyAntigravityThoughtSignatureReplayPartPath(payload []byte, itemResult 
 	if !legacyAntigravityReplayItemContextMatches(payload, itemResult, ci) {
 		return "", false
 	}
-	pi := int(itemResult.Get("partIndex").Int())
-	if pi >= 0 && pi < len(partArr) && partArr[pi].Type != gjson.Null {
-		if kind, _ := antigravityReplayPartFingerprint(partArr[pi]); kind != "" {
-			return fmt.Sprintf("request.contents.%d.parts.%d", ci, pi), true
+	partIndex := int(itemResult.Get("partIndex").Int())
+	if partIndex >= 0 && partIndex < len(partArr) && partArr[partIndex].Type != gjson.Null {
+		if kind, _ := antigravityReplayPartFingerprint(partArr[partIndex]); kind != "" {
+			return fmt.Sprintf("request.contents.%d.parts.%d", ci, partIndex), true
 		}
 	}
 	// Legacy cache entries may point at a streamed signature-only part after
@@ -383,16 +383,16 @@ func legacyMergeAntigravityFunctionCallPartReplayWithSchemas(payload []byte, ite
 	if name == "" || !args.Exists() {
 		return payload, false
 	}
-	if ci, pi, exists := legacyAntigravityFunctionCallPartLocationForReplayWithSchemas(payload, itemResult, toolSchemas); exists {
+	if ci, partIndex, exists := legacyAntigravityFunctionCallPartLocationForReplayWithSchemas(payload, itemResult, toolSchemas); exists {
 		_, allowLegacyIDRestore := toolSchemas[name]
-		return restoreAntigravityNativeFunctionCallReplay(payload, ci, pi, itemResult, allowLegacyIDRestore, true)
+		return restoreAntigravityNativeFunctionCallReplay(payload, ci, partIndex, itemResult, allowLegacyIDRestore, true)
 	}
 	// The context drifted, but an exact opaque ID match still proves this call's
 	// identity. Gemini validates a thought signature's own integrity and nothing
 	// about the history around it, so the drift costs the signature nothing: restore
 	// the native call and its signature rather than making the model re-reason.
-	if ci, pi, exists := legacyAntigravityFunctionCallProvenanceLocation(payload, itemResult, toolSchemas); exists {
-		return restoreAntigravityNativeFunctionCallReplay(payload, ci, pi, itemResult, false, true)
+	if ci, partIndex, exists := legacyAntigravityFunctionCallProvenanceLocation(payload, itemResult, toolSchemas); exists {
+		return restoreAntigravityNativeFunctionCallReplay(payload, ci, partIndex, itemResult, false, true)
 	}
 	if callID != "" {
 		stableID := util.GeminiClaudeToolUseID(callID, name, args.Raw)
@@ -426,11 +426,11 @@ func legacyMergeAntigravityFunctionCallPartReplayWithSchemas(payload []byte, ite
 	if ci < 0 || !legacyAntigravityReplayItemContextMatches(payload, itemResult, ci) {
 		return payload, false
 	}
-	pi := int(itemResult.Get("partIndex").Int())
+	partIndex := int(itemResult.Get("partIndex").Int())
 	out := payload
 	changed := false
 
-	partPath, exists := antigravityExistingReplayPartPath(out, ci, pi)
+	partPath, exists := antigravityExistingReplayPartPath(out, ci, partIndex)
 	if !exists {
 		fc := map[string]any{"name": name}
 		if callID != "" {
@@ -448,7 +448,7 @@ func legacyMergeAntigravityFunctionCallPartReplayWithSchemas(payload []byte, ite
 		if sig != "" {
 			part["thoughtSignature"] = sig
 		}
-		if updated, err := sjson.SetBytes(out, antigravityReplayPartWritePath(out, ci, pi), part); err == nil {
+		if updated, err := sjson.SetBytes(out, antigravityReplayPartWritePath(out, ci, partIndex), part); err == nil {
 			return updated, true
 		}
 		return payload, false

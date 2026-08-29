@@ -1244,8 +1244,8 @@ func degradeAntigravityClaudeToolProvenanceIDs(payload []byte) ([]byte, int) {
 		if !parts.IsArray() {
 			continue
 		}
-		for pi, part := range parts.Array() {
-			partPath := fmt.Sprintf("request.contents.%d.parts.%d", ci, pi)
+		for partIndex, part := range parts.Array() {
+			partPath := fmt.Sprintf("request.contents.%d.parts.%d", ci, partIndex)
 			if fc := part.Get("functionCall"); fc.Exists() {
 				id := strings.TrimSpace(fc.Get("id").String())
 				if !util.IsGeminiClaudeToolUseID(id) {
@@ -1586,11 +1586,11 @@ func mergeAntigravityFunctionCallPartReplayWithSchemas(index *antigravityReplayR
 	if ci < 0 || !index.contextMatches(itemResult, ci) {
 		return payload, false
 	}
-	pi := int(itemResult.Get("partIndex").Int())
+	partIndex := int(itemResult.Get("partIndex").Int())
 	out := payload
 	changed := false
 
-	partPath, exists := antigravityExistingReplayPartPath(out, ci, pi)
+	partPath, exists := antigravityExistingReplayPartPath(out, ci, partIndex)
 	if !exists {
 		fc := map[string]any{"name": name}
 		if callID != "" {
@@ -1608,7 +1608,7 @@ func mergeAntigravityFunctionCallPartReplayWithSchemas(index *antigravityReplayR
 		if sig != "" {
 			part["thoughtSignature"] = sig
 		}
-		if updated, err := sjson.SetBytes(out, antigravityReplayPartWritePath(out, ci, pi), part); err == nil {
+		if updated, err := sjson.SetBytes(out, antigravityReplayPartWritePath(out, ci, partIndex), part); err == nil {
 			return updated, true
 		}
 		return payload, false
@@ -1834,7 +1834,7 @@ func (a *antigravityReasoningReplayAccumulator) observeResponsePayload(payload [
 		return
 	}
 	parts.ForEach(func(_, part gjson.Result) bool {
-		pi := a.nextPartIndex
+		partIndex := a.nextPartIndex
 		a.nextPartIndex++
 		signature := antigravityNativePartThoughtSignature(part)
 		if !antigravityHasNativeThoughtSignature(signature) {
@@ -1866,7 +1866,7 @@ func (a *antigravityReasoningReplayAccumulator) observeResponsePayload(payload [
 			for _, key := range keys {
 				dedupeKey := key + "\x00" + signature
 				if signature == "" {
-					dedupeKey = fmt.Sprintf("%s\x00part:%d", key, pi)
+					dedupeKey = fmt.Sprintf("%s\x00part:%d", key, partIndex)
 				}
 				if a.seenFC[dedupeKey] {
 					return true
@@ -1878,7 +1878,7 @@ func (a *antigravityReasoningReplayAccumulator) observeResponsePayload(payload [
 			if occurrenceKey != "" {
 				a.functionCallOccurrences[occurrenceKey] = occurrence + 1
 			}
-			item := buildAntigravityFunctionCallPartItem(a.contentIndex, pi, occurrence, fc, signature)
+			item := buildAntigravityFunctionCallPartItem(a.contentIndex, partIndex, occurrence, fc, signature)
 			if len(item) > 0 {
 				a.appendItem(antigravitySetReplayItemContextHashValue(item, a.responseContextHash))
 				if signature != "" {
@@ -1935,12 +1935,12 @@ func (a *antigravityReasoningReplayAccumulator) observeResponsePayload(payload [
 			}
 			if targetKind == "thought" {
 				if a.thoughtText.Len() == 0 {
-					a.thoughtPartIndex = pi
+					a.thoughtPartIndex = partIndex
 				}
 				a.thoughtText.WriteString(text.String())
 			} else {
 				if a.visibleText.Len() == 0 {
-					a.visiblePartIndex = pi
+					a.visiblePartIndex = partIndex
 				}
 				a.visibleText.WriteString(text.String())
 			}

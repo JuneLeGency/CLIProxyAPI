@@ -973,31 +973,31 @@ func matchModelPattern(pattern, model string) bool {
 		return true
 	}
 	// Iterative glob-style matcher supporting only '*' wildcard.
-	pi, si := 0, 0
+	patternIndex, si := 0, 0
 	starIdx := -1
 	matchIdx := 0
 	for si < len(model) {
-		if pi < len(pattern) && (pattern[pi] == model[si]) {
-			pi++
+		if patternIndex < len(pattern) && (pattern[patternIndex] == model[si]) {
+			patternIndex++
 			si++
 			continue
 		}
-		if pi < len(pattern) && pattern[pi] == '*' {
-			starIdx = pi
+		if patternIndex < len(pattern) && pattern[patternIndex] == '*' {
+			starIdx = patternIndex
 			matchIdx = si
-			pi++
+			patternIndex++
 			continue
 		}
 		if starIdx != -1 {
-			pi = starIdx + 1
+			patternIndex = starIdx + 1
 			matchIdx++
 			si = matchIdx
 			continue
 		}
 		return false
 	}
-	for pi < len(pattern) && pattern[pi] == '*' {
-		pi++
+	for patternIndex < len(pattern) && pattern[patternIndex] == '*' {
+		patternIndex++
 	}
-	return pi == len(pattern)
+	return patternIndex == len(pattern)
 }
