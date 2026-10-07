@@ -9,12 +9,12 @@ import (
 	"context"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
-	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/cache"
+	sigcompat "github.com/router-for-me/CLIProxyAPI/v8/internal/signature"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/translator/gemini/common"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -359,14 +359,14 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 			}
 			originalRole := roleResult.String()
 			var precedingToolUseIDs []string
-			if originalRole != "system" {
+			if originalRole != "system" && originalRole != "developer" {
 				precedingToolUseIDs = pendingToolUseIDs
 				pendingToolUseIDs = nil
 			}
 			role := originalRole
 			if role == "assistant" {
 				role = "model"
-			} else if role == "system" {
+			} else if role == "system" || role == "developer" {
 				role = "user"
 			}
 			partItems := make([][]byte, 0, 4)
@@ -389,7 +389,7 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 				pendingDetachedTargetKind = targetKind
 			}
 			contentsResult := messageResult.Get("content")
-			if originalRole == "system" {
+			if originalRole == "system" || originalRole == "developer" {
 				if reminderText, ok := translatorcommon.ClaudeMessageSystemReminderText(contentsResult); ok {
 					partJSON := []byte(`{}`)
 					partJSON, _ = sjson.SetBytes(partJSON, "text", reminderText)
@@ -675,9 +675,9 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 								}
 
 								if len(nonImageItems) == 1 {
-									functionResponseJSON, _ = sjson.SetRawBytes(functionResponseJSON, "response.result", nonImageItems[0])
+									functionResponseJSON = translatorcommon.SetGeminiFunctionResponseRaw(functionResponseJSON, "response.result", string(nonImageItems[0]))
 								} else if len(nonImageItems) > 1 {
-									functionResponseJSON, _ = sjson.SetRawBytes(functionResponseJSON, "response.result", translatorcommon.JoinRawArray(nonImageItems))
+									functionResponseJSON = translatorcommon.SetGeminiFunctionResponseRaw(functionResponseJSON, "response.result", string(translatorcommon.JoinRawArray(nonImageItems)))
 								} else {
 									functionResponseJSON, _ = sjson.SetBytes(functionResponseJSON, "response.result", "")
 								}
@@ -704,10 +704,10 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 									functionResponseJSON, _ = sjson.SetRawBytes(functionResponseJSON, "parts", translatorcommon.JoinRawArray([][]byte{imagePartJSON}))
 									functionResponseJSON, _ = sjson.SetBytes(functionResponseJSON, "response.result", "")
 								} else {
-									functionResponseJSON, _ = sjson.SetRawBytes(functionResponseJSON, "response.result", []byte(functionResponseResult.Raw))
+									functionResponseJSON = translatorcommon.SetGeminiFunctionResponseResult(functionResponseJSON, "response.result", functionResponseResult)
 								}
 							} else if functionResponseResult.Raw != "" {
-								functionResponseJSON, _ = sjson.SetRawBytes(functionResponseJSON, "response.result", []byte(functionResponseResult.Raw))
+								functionResponseJSON = translatorcommon.SetGeminiFunctionResponseResult(functionResponseJSON, "response.result", functionResponseResult)
 							} else {
 								// Content field is missing entirely — .Raw is empty which
 								// causes sjson.SetRaw to produce invalid JSON (e.g. "result":}).
@@ -838,8 +838,22 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	out := []byte(`{"model":"","request":{"contents":[]}}`)
 	out, _ = sjson.SetBytes(out, "model", modelName)
 
+	// tool_choice metadata
+	toolChoiceResult := gjson.GetBytes(rawJSON, "tool_choice")
+	toolChoiceType := ""
+	toolChoiceName := ""
+	if toolChoiceResult.Exists() {
+		if toolChoiceResult.IsObject() {
+			toolChoiceType = toolChoiceResult.Get("type").String()
+			toolChoiceName = toolChoiceResult.Get("name").String()
+		} else if toolChoiceResult.Type == gjson.String {
+			toolChoiceType = toolChoiceResult.String()
+		}
+	}
+	isToolChoiceNone := strings.EqualFold(strings.TrimSpace(toolChoiceType), "none")
+
 	// Inject interleaved thinking hint when both tools and thinking are active
-	hasTools := toolDeclCount > 0
+	hasTools := toolDeclCount > 0 && !isToolChoiceNone
 	thinkingResult := gjson.GetBytes(rawJSON, "thinking")
 	thinkingType := thinkingResult.Get("type").String()
 	hasThinking := thinkingResult.Exists() && thinkingResult.IsObject() && (thinkingType == "enabled" || thinkingType == "adaptive" || thinkingType == "auto")
@@ -857,29 +871,25 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 		out, _ = sjson.SetRawBytes(out, "request.systemInstruction", antigravityClaudeContent("user", systemParts))
 	}
 	if len(contentItems) > 0 {
-		out = translatorcommon.SetRawArrayItems(out, "request.contents", translatorcommon.MergeAdjacentGeminiContents(contentItems))
+		if util.IsClaudeModel(modelName) {
+			contentItems = translatorcommon.SplitGeminiFunctionResponseTurns(contentItems)
+			out = translatorcommon.SetRawArrayItems(out, "request.contents", translatorcommon.MergeAdjacentGeminiUserContents(contentItems))
+		} else {
+			out = translatorcommon.SetRawArrayItems(out, "request.contents", translatorcommon.MergeAdjacentGeminiContents(contentItems))
+		}
 	}
-	if toolDeclCount > 0 {
+	if toolDeclCount > 0 && !isToolChoiceNone {
 		out, _ = sjson.SetRawBytes(out, "request.tools", toolsJSON)
 	}
 
 	// tool_choice
-	toolChoiceResult := gjson.GetBytes(rawJSON, "tool_choice")
 	if toolChoiceResult.Exists() {
-		toolChoiceType := ""
-		toolChoiceName := ""
-		if toolChoiceResult.IsObject() {
-			toolChoiceType = toolChoiceResult.Get("type").String()
-			toolChoiceName = toolChoiceResult.Get("name").String()
-		} else if toolChoiceResult.Type == gjson.String {
-			toolChoiceType = toolChoiceResult.String()
-		}
-
-		switch toolChoiceType {
+		switch strings.ToLower(strings.TrimSpace(toolChoiceType)) {
 		case "auto":
 			out, _ = sjson.SetBytes(out, "request.toolConfig.functionCallingConfig.mode", "AUTO")
 		case "none":
 			out, _ = sjson.SetBytes(out, "request.toolConfig.functionCallingConfig.mode", "NONE")
+			out, _ = sjson.DeleteBytes(out, "request.tools")
 		case "any":
 			out, _ = sjson.SetBytes(out, "request.toolConfig.functionCallingConfig.mode", "ANY")
 		case "tool":

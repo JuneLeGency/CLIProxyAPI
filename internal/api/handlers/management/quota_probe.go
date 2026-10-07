@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/quota"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/quota"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 // probeTimeout caps a single quota-refresh probe. It must be long enough for
@@ -73,7 +73,7 @@ func (h *Handler) ProbeQuota(ctx context.Context, auth *coreauth.Auth) probeResu
 	// the underlying credential's actual quota state. Force a refresh first
 	// — if the refresh_token itself is also dead, the error surfaces cleanly
 	// in `error` instead of hiding inside a generic 401.
-	if errRefresh := h.authManager.ForceRefreshAuth(probeCtx, auth.ID); errRefresh != nil {
+	if _, errRefresh := h.authManager.ForceRefreshAuth(probeCtx, auth.ID); errRefresh != nil {
 		// Non-fatal: some auths have no refresh_token (api-key entries,
 		// for example), and their executor's Refresh is a no-op that
 		// returns nil. The error path covers actually-dead refresh tokens
